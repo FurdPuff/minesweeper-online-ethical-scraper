@@ -23,7 +23,7 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
     g = 0  # guard tracker
 
     os.makedirs(folder, exist_ok=True)
-    attempted_ids_path = os.path.join(folder, "attempted_ids.txt")
+    attempted_ids_path = "attempted_ids.txt"
 
     loss_file_ids = {int(file.stem) for file in Path(folder).glob("*.json")}
     attempted_file_ids = load_attempted_ids(attempted_ids_path)
@@ -58,7 +58,6 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
             pass
 
         try:
-            # Allow the very first request to fire immediately.
             last_request_time = time.perf_counter() - DELAY_SECONDS
 
             while l < limit and g < guard:
@@ -82,12 +81,6 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
 
                 url = f"https://minesweeper.online/game/{game_id}"
 
-                # Minimum-interval throttle, no busy-wait: sleep only for
-                # whatever time is still owed since the last request. If the
-                # previous iteration's network/parsing work already ate up
-                # more than DELAY_SECONDS, this is a no-op -- the loop
-                # always keeps moving, it just never fires requests to the
-                # site faster than DELAY_SECONDS apart.
                 elapsed = time.perf_counter() - last_request_time
                 remaining = DELAY_SECONDS - elapsed
                 if remaining > 0:
@@ -129,7 +122,7 @@ def load_attempted_ids(path: str) -> set[int]:
                 try:
                     ids.add(int(line))
                 except ValueError:
-                    continue  # skip any corrupted/partial line
+                    continue
     return ids
 
 def load_game_page(page: Page, url: str) -> str | None:
@@ -171,7 +164,19 @@ def get_game(html: str) -> Game | None:
     width = max_x + 1
     height = max_y + 1
 
-    game = Game(width, height)
+    minecount = 0
+    for i in range(3):
+        zeros = "0" * i
+        mines_div = soup.find("div", id=f"top_area_mines_1{zeros}")
+        for cls in mines_div.get("class", []):
+            if cls.startswith("hd_top-area-num"):
+                value = int(cls.replace("hd_top-area-num", ""))
+                if 0 <= value <= 9:
+                    minecount += value * 10 ** i
+                break
+
+    game = Game(width, height, minecount)
+
     for cell in cells:
         x = int(cell["data-x"])
         y = int(cell["data-y"])

@@ -17,9 +17,10 @@ class Cell:
         return cls(**data)
 
 class Game:
-    def __init__(self, width: int, height: int):
+    def __init__(self, width: int, height: int, minecount: int):
         self.width = width
         self.height = height
+        self.minecount = minecount
         self.grid = [[Cell(x, y) for x in range(width)] for y in range(height)]
 
     def out_of_bounds(self, x: int, y: int) -> bool:
@@ -48,6 +49,7 @@ class Game:
         return {
             "width": self.width,
             "height": self.height,
+            "minecount": self.minecount,
             "grid": [[cell.to_dict() for cell in row] for row in self.grid]
         }
 
