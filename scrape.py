@@ -2,10 +2,12 @@ import random
 import time
 import json
 import os
+import sys
 from pathlib import Path
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
 from game import Game
+from login import run_login
 
 MIN_ID = 1_000_000_000
 MAX_ID = 6_000_000_000
@@ -226,9 +228,21 @@ def download(game: Game, url: str, folder: str):
 
 
 if __name__ == "__main__":
+    num = 100
+    loss_folder = "losses"
+    if len(sys.argv) > 1:
+        for arg in sys.argv[1:]:
+            try:
+                num = int(arg)
+            except ValueError:
+                loss_folder = arg
+                pass
+    
+    run_login()
+
     attempted_ids, valid_game_ids, loss_ids = fetch_losses(
-        limit=5000,
-        folder="losses",
+        limit=num,
+        folder=loss_folder
     )
 
     print("\nFinished!")

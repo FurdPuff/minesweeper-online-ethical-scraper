@@ -4,8 +4,7 @@ from playwright.sync_api import sync_playwright
 
 AUTH_STATE_PATH = "auth.json"
 
-
-def main():
+def run_login():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         context = browser.new_context()
@@ -21,4 +20,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_login()
