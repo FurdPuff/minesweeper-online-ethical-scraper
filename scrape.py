@@ -140,14 +140,14 @@ def get_game(html: str) -> Game | None:
 
         classes = cell.get("class", [])
 
-        opened = "hdd_opened" in classes
-        mine = "hdd_type10" in classes or "hdd_type11" in classes
-        flag = "hdd_flag" in classes or "hdd_type12" in classes
-        incorrect = "hdd_type11" in classes or "hdd_type12" in classes
+        opened = "hd_opened" in classes
+        mine = "hd_type10" in classes or "hd_type11" in classes
+        flag = "hd_flag" in classes or "hd_type12" in classes
+        incorrect = "hd_type11" in classes or "hd_type12" in classes
 
         for cls in classes:
-            if cls.startswith("hdd_type"):
-                value = int(cls.replace("hdd_type", ""))
+            if cls.startswith("hd_type"):
+                value = int(cls.replace("hd_type", ""))
                 if value >= 1 and value <= 8:
                     number = value
                     opened = True
