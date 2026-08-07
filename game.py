@@ -1,18 +1,18 @@
 import json
+from dataclasses import dataclass
 
+@dataclass
 class Cell:
-    def __init__(self, x: int, y: int, number: int | None = None, opened: bool = False,
-                 mine: bool = False, flag: bool = False, incorrect: bool = False):
-        self.x = x
-        self.y = y
-        self.number = number
-        self.opened = opened
-        self.mine = mine
-        self.flag = flag
-        self.incorrect = incorrect
+    x: int
+    y: int
+    number: int | None = None
+    opened: bool = False
+    mine: bool = False
+    flag: bool = False
+    incorrect: bool = False
 
     def to_dict(self) -> dict:
-        return vars(self)
+            return vars(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Cell":
