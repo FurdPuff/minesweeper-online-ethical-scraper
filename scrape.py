@@ -20,7 +20,18 @@ CELL_WAIT_TIMEOUT_MS = 8_000
 DELAY_SECONDS = 1.5
 
 def fetch_losses(limit: int, folder: str, guard: int = GUARD,
-                  auth_state: str = AUTH_STATE_PATH):
+                  auth_state: str = AUTH_STATE_PATH) -> tuple[set[int], set[int], set[int]]:
+    """downloads player losses from minesweeper.online
+
+    Args:
+        limit (int): desired/maximum amount of losses stored
+        folder (str): losses folder path
+        guard (int, optional): _description_. Defaults to GUARD.
+        auth_state (str, optional): authorization path. Defaults to AUTH_STATE_PATH.
+
+    Returns:
+        tuple[set[int], set[int], set[int]]: attempted game ids, valid game ids, loss ids
+    """
     l = 0  # limit tracker
     g = 0  # guard tracker
 
@@ -112,7 +123,6 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
 
     return attempted_ids, valid_game_ids, loss_ids
 
-
 def load_attempted_ids(path: str) -> set[int]:
     if not os.path.exists(path):
         return set()
@@ -144,6 +154,7 @@ def load_game_page(page: Page, url: str) -> str | None:
     return page.content()
 
 def get_game(html: str) -> Game | None:
+    """Returns game given minesweeper.online html and returns None if invalid"""
     soup = BeautifulSoup(html, "html.parser")
 
     area_block = soup.find("div", id="AreaBlock")
@@ -170,6 +181,8 @@ def get_game(html: str) -> Game | None:
     for i in range(3):
         zeros = "0" * i
         mines_div = soup.find("div", id=f"top_area_mines_1{zeros}")
+        if mines_div is None: # Games less than 4 cells wide do not show their minecounts
+            return None
         for cls in mines_div.get("class", []):
             if cls.startswith("hd_top-area-num"):
                 value = int(cls.replace("hd_top-area-num", ""))
@@ -204,10 +217,8 @@ def get_game(html: str) -> Game | None:
 
     return game
 
-
 def is_loss(game: Game) -> bool:
     return game.loss_trigger() is not None
-
 
 def download(game: Game, url: str, folder: str):
     os.makedirs(folder, exist_ok=True)

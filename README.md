@@ -2,7 +2,7 @@
 
 **created for educational purposes only**
 
-The program scrapes minesweeper.online for lost games from players. Game data is outputted via JSON in "losses" folder and can be read using from_dict function in game class. 
+The program scrapes minesweeper.online for minesweeper losses. Game data is outputted via JSON files in "losses" folder and can be read using read_json and read_game_data functions within game.py.
 
 Credit to use the program is not required but is appreciated. I am not responsible for misuse of this software.
 

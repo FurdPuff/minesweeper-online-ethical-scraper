@@ -1,3 +1,5 @@
+import json
+
 class Cell:
     def __init__(self, x: int, y: int, number: int | None = None, opened: bool = False,
                  mine: bool = False, flag: bool = False, incorrect: bool = False):
@@ -55,9 +57,29 @@ class Game:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Game":
-        game = cls(width = data["width"], height = data["height"])
+        game = cls(
+            width=data["width"], 
+            height=data["height"],
+            minecount=data["minecount"]
+        )
         game.grid = [
             [Cell.from_dict(cell_data) for cell_data in row]
             for row in data["grid"]
         ]
         return game
+
+def read_json(path: str):
+    """reads in game json returns game id, game url, and game"""
+    with open(path) as f:
+        return read_game_data(json.load(f))
+
+def read_game_data(data: dict) -> tuple[int | None, str, Game]:
+    """reads in game data and returns game id, game url, and game"""
+    game = Game.from_dict(data["game"])
+
+    try:
+        game_id = int(data["id"])
+    except (KeyError, ValueError, TypeError):
+        game_id = None
+    
+    return game_id, data["url"], game
