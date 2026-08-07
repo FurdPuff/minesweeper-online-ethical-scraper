@@ -2,86 +2,121 @@ import random
 import time
 import json
 import os
-import requests
-from requests import Response
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
 from game import Game
 
-MIN_ID = 1000000000
-MAX_ID = 6000000000
+MIN_ID = 1_000_000_000
+MAX_ID = 6_000_000_000
 
-GUARD = 50
+GUARD = 10_000_000
 
-def fetch_losses(limit: int, folder: str, guard: int = GUARD):
-    l = 0 # limit tracker
-    g = 0 # guard tracker
+AUTH_STATE_PATH = "auth.json"
+NAV_TIMEOUT_MS = 8_000
+CELL_WAIT_TIMEOUT_MS = 8_000
+POLITE_DELAY_SECONDS = 1.0
+
+def fetch_losses(limit: int, folder: str, guard: int = GUARD,
+                  auth_state: str = AUTH_STATE_PATH):
+    l = 0  # limit tracker
+    g = 0  # guard tracker
 
     attempted_ids = set()
     valid_game_ids = set()
     loss_ids = set()
 
-    session = requests.Session()
-
-    while (l < limit and g < guard):
-        g += 1 # catch infinite loop
-
-        game_id = random.randint(MIN_ID, MAX_ID)
-        if game_id in attempted_ids: 
-            continue
-        attempted_ids.add(game_id)
-
+    has_auth = os.path.exists(auth_state)
+    if not has_auth:
         print(
-            f"\rLosses: {l}/{limit} | "
-            f"Attempts: {g} | "
-            f"Valid: {len(valid_game_ids)} | "
-            f"Current ID: {game_id}",
-            end="",
-            flush=True,
+            f"[warning] No saved session found at '{auth_state}'. "
+            f"Proceeding as an anonymous/guest session.\n"
+            f"          If every game comes back invalid, run `python login.py` "
+            f"first and re-run this script.\n"
         )
 
-        url = 'http://minesweeper.online/game/' + str(game_id)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            storage_state=auth_state if has_auth else None,
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+            ),
+        )
+        page = context.new_page()
 
         try:
-            response = session.get(
-                url,
-                timeout = 10,
-                headers = { "User-Agent": "Mozilla/5.0" }
-            )
-        except requests.RequestException:
-            continue
+            page.goto("https://minesweeper.online/", timeout=NAV_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            pass
 
-        time.sleep(1.5)
+        try:
+            while l < limit and g < guard:
+                g += 1  # catch infinite loop
 
-        game = get_game(response)
-        if game is None:
-            continue
-        valid_game_ids.add(game_id)
+                game_id = random.randint(MIN_ID, MAX_ID)
+                if game_id in attempted_ids:
+                    continue
+                attempted_ids.add(game_id)
 
-        if is_loss(game):
-            download(game, url, folder)
-            loss_ids.add(game_id)
+                print(
+                    f"\rLosses: {l}/{limit} | "
+                    f"Attempts: {g} | "
+                    f"Valid: {len(valid_game_ids)} | "
+                    f"Current ID: {game_id}",
+                    end="",
+                    flush=True,
+                )
 
-            l += 1
-    session.close()
+                url = f"https://minesweeper.online/game/{game_id}"
+
+                html = load_game_page(page, url)
+                time.sleep(POLITE_DELAY_SECONDS)
+
+                if html is None:
+                    continue
+
+                game = get_game(html)
+                if game is None:
+                    continue
+                valid_game_ids.add(game_id)
+
+                if is_loss(game):
+                    download(game, url, folder)
+                    loss_ids.add(game_id)
+                    l += 1
+        finally:
+            context.close()
+            browser.close()
 
     return attempted_ids, valid_game_ids, loss_ids
 
-def get_game(res: Response) -> Game | None:
-    if res.status_code != requests.codes.ok:
-        print(f"\n[DEBUG] Bad status: {res.status_code} for {res.url}")
+
+def load_game_page(page: Page, url: str) -> str | None:
+    try:
+        page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+    except PlaywrightTimeoutError:
         return None
-    
-    soup = BeautifulSoup(res.text, "html.parser")
+    except Exception:
+        return None
+
+    try:
+        page.wait_for_selector(".cell", timeout=CELL_WAIT_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        return None
+
+    time.sleep(0.3) # settle time
+    return page.content()
+
+def get_game(html: str) -> Game | None:
+    soup = BeautifulSoup(html, "html.parser")
+
     area_block = soup.find("div", id="AreaBlock")
     if area_block is None:
-        print(f"\n[DEBUG] No AreaBlock. Response length: {len(res.text)}")
-        print(f"[DEBUG] Title: {soup.title.string if soup.title else 'none'}")
-        print(f"[DEBUG] Snippet: {res.text[:300]}")
         return None
-    
+
     cells = soup.find_all("div", class_="cell")
     if not cells:
-        print(f"\n[DEBUG] AreaBlock found but no cells")
         return None
 
     max_x = 0
@@ -102,35 +137,30 @@ def get_game(res: Response) -> Game | None:
         y = int(cell["data-y"])
 
         number = None
-        opened = False
-        mine = False
-        flag = False
-        incorrect = False
 
-        if "hdd_type10" in cell.get("class", []):
-            mine = True
-        elif "hdd_flag" in cell.get("class", []):
-            flag = True
-        elif "hdd_type11" in cell.get("class", []):
-            mine = True
-            opened = True
-            incorrect = True
-        elif "hdd_type12" in cell.get("class", []):
-            flag = True
-            opened = True
-            incorrect = True
-        else:
-            for cls in cell.get('class', []):
-                if cls.startswith('hdd_type'):
-                    value = cls.replace('hdd_type', '')
-                    number = int(value)
+        classes = cell.get("class", [])
+
+        opened = "hdd_opened" in classes
+        mine = "hdd_type10" in classes or "hdd_type11" in classes
+        flag = "hdd_flag" in classes or "hdd_type12" in classes
+        incorrect = "hdd_type11" in classes or "hdd_type12" in classes
+
+        for cls in classes:
+            if cls.startswith("hdd_type"):
+                value = int(cls.replace("hdd_type", ""))
+                if value >= 1 and value <= 8:
+                    number = value
                     opened = True
+                break
+         
         game.add(x, y, number, opened, mine, flag, incorrect)
 
     return game
 
+
 def is_loss(game: Game) -> bool:
     return game.loss_trigger() is not None
+
 
 def download(game: Game, url: str, folder: str):
     os.makedirs(folder, exist_ok=True)
@@ -149,9 +179,10 @@ def download(game: Game, url: str, folder: str):
             indent=2
         )
 
+
 if __name__ == "__main__":
     attempted_ids, valid_game_ids, loss_ids = fetch_losses(
-        limit=5000,
+        limit=10,
         folder="losses",
     )
 
