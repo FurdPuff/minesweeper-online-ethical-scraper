@@ -2,6 +2,7 @@ import random
 import time
 import json
 import os
+from pathlib import Path
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
 from game import Game
@@ -14,14 +15,20 @@ GUARD = 10_000_000
 AUTH_STATE_PATH = "auth.json"
 NAV_TIMEOUT_MS = 8_000
 CELL_WAIT_TIMEOUT_MS = 8_000
-POLITE_DELAY_SECONDS = 1.0
+DELAY_SECONDS = 1.5
 
 def fetch_losses(limit: int, folder: str, guard: int = GUARD,
                   auth_state: str = AUTH_STATE_PATH):
     l = 0  # limit tracker
     g = 0  # guard tracker
 
-    attempted_ids = set()
+    os.makedirs(folder, exist_ok=True)
+    attempted_ids_path = os.path.join(folder, "attempted_ids.txt")
+
+    loss_file_ids = {int(file.stem) for file in Path(folder).glob("*.json")}
+    attempted_file_ids = load_attempted_ids(attempted_ids_path)
+    attempted_ids = loss_file_ids | attempted_file_ids
+
     valid_game_ids = set()
     loss_ids = set()
 
@@ -34,7 +41,7 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
             f"first and re-run this script.\n"
         )
 
-    with sync_playwright() as p:
+    with sync_playwright() as p, open(attempted_ids_path, "a", encoding="utf-8") as attempted_ids_file:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             storage_state=auth_state if has_auth else None,
@@ -51,6 +58,9 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
             pass
 
         try:
+            # Allow the very first request to fire immediately.
+            last_request_time = time.perf_counter() - DELAY_SECONDS
+
             while l < limit and g < guard:
                 g += 1  # catch infinite loop
 
@@ -58,6 +68,8 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
                 if game_id in attempted_ids:
                     continue
                 attempted_ids.add(game_id)
+                attempted_ids_file.write(f"{game_id}\n")
+                attempted_ids_file.flush()
 
                 print(
                     f"\rLosses: {l}/{limit} | "
@@ -70,8 +82,19 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
 
                 url = f"https://minesweeper.online/game/{game_id}"
 
+                # Minimum-interval throttle, no busy-wait: sleep only for
+                # whatever time is still owed since the last request. If the
+                # previous iteration's network/parsing work already ate up
+                # more than DELAY_SECONDS, this is a no-op -- the loop
+                # always keeps moving, it just never fires requests to the
+                # site faster than DELAY_SECONDS apart.
+                elapsed = time.perf_counter() - last_request_time
+                remaining = DELAY_SECONDS - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
+                last_request_time = time.perf_counter()
+
                 html = load_game_page(page, url)
-                time.sleep(POLITE_DELAY_SECONDS)
 
                 if html is None:
                     continue
@@ -81,16 +104,33 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
                     continue
                 valid_game_ids.add(game_id)
 
-                if is_loss(game):
-                    download(game, url, folder)
-                    loss_ids.add(game_id)
-                    l += 1
+                if not is_loss(game):
+                    continue
+
+                download(game, url, folder)
+                loss_ids.add(game_id)
+                l += 1
+
         finally:
             context.close()
             browser.close()
 
     return attempted_ids, valid_game_ids, loss_ids
 
+
+def load_attempted_ids(path: str) -> set[int]:
+    if not os.path.exists(path):
+        return set()
+    ids = set()
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    ids.add(int(line))
+                except ValueError:
+                    continue  # skip any corrupted/partial line
+    return ids
 
 def load_game_page(page: Page, url: str) -> str | None:
     try:
@@ -148,11 +188,11 @@ def get_game(html: str) -> Game | None:
         for cls in classes:
             if cls.startswith("hd_type"):
                 value = int(cls.replace("hd_type", ""))
-                if value >= 1 and value <= 8:
+                if 0 <= value <= 8:
                     number = value
                     opened = True
                 break
-         
+
         game.add(x, y, number, opened, mine, flag, incorrect)
 
     return game
@@ -182,7 +222,7 @@ def download(game: Game, url: str, folder: str):
 
 if __name__ == "__main__":
     attempted_ids, valid_game_ids, loss_ids = fetch_losses(
-        limit=10,
+        limit=5000,
         folder="losses",
     )
 
