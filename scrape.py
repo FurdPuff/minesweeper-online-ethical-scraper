@@ -1,3 +1,4 @@
+import argparse
 import random
 import time
 import json
@@ -5,7 +6,12 @@ import os
 import sys
 from pathlib import Path
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import (
+    sync_playwright,
+    Page,
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeoutError,
+)
 from game import Game
 from login import run_login
 
@@ -20,7 +26,8 @@ CELL_WAIT_TIMEOUT_MS = 8_000
 DELAY_SECONDS = 1.5
 
 def fetch_losses(limit: int, folder: str, guard: int = GUARD,
-                  auth_state: str = AUTH_STATE_PATH) -> tuple[set[int], set[int], set[int]]:
+                  auth_state: str = AUTH_STATE_PATH,
+                  retry_attempted: bool = False) -> tuple[set[int], set[int], set[int]]:
     """downloads player losses from minesweeper.online
 
     Args:
@@ -41,9 +48,14 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
     loss_file_ids = {int(file.stem) for file in Path(folder).glob("*.json")}
     attempted_file_ids = load_attempted_ids(attempted_ids_path)
     attempted_ids = loss_file_ids | attempted_file_ids
+    retry_ids = iter(sorted(attempted_file_ids - loss_file_ids))
 
     valid_game_ids = set()
     loss_ids = set()
+    page_load_failures = 0
+    pages_checked = 0
+    unrecognized_pages = 0
+    parse_failures: dict[str, int] = {}
 
     has_auth = os.path.exists(auth_state)
     if not has_auth:
@@ -70,18 +82,64 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
         except PlaywrightTimeoutError:
             pass
 
+        auth_status = page.evaluate(
+            """() => ({
+                sessionLoaded: Boolean(window.localStorage.getItem('_session')),
+                authenticatedUi: Boolean(document.querySelector('.auth-required:not(.hide)')),
+                guestUi: Boolean(document.querySelector('.auth-free:not(.hide)')),
+            })"""
+        )
+        session_loaded = auth_status["sessionLoaded"]
+        if has_auth and not session_loaded:
+            print(
+                f"\n[warning] '{auth_state}' did not load a Minesweeper session. "
+                "Log in again and press Enter after the site shows your account."
+            )
+        else:
+            print(
+                "\n[info] Authentication status: "
+                f"session token loaded={session_loaded}, "
+                f"account UI visible={auth_status['authenticatedUi']}, "
+                f"guest login UI visible={auth_status['guestUi']}."
+            )
+
+        if loss_file_ids:
+            reference_id = max(loss_file_ids)
+            reference_url = f"https://minesweeper.online/game/{reference_id}"
+            time.sleep(DELAY_SECONDS)
+            reference_html = load_game_page(page, reference_url)
+            if reference_html is None:
+                print(
+                    f"[diagnostic] Could not load previously saved game {reference_id}; "
+                    f"final_url={page.url!r}"
+                )
+            else:
+                reference_game, reference_error = parse_game(reference_html)
+                if reference_game is None:
+                    print(
+                        f"[diagnostic] Previously saved game {reference_id} "
+                        f"did not parse ({reference_error}); "
+                        f"title={page.title()!r}, final_url={page.url!r}, "
+                        f"{describe_game_page(reference_html)}"
+                    )
+                else:
+                    print(
+                        f"[diagnostic] Previously saved game {reference_id} parsed "
+                        f"successfully ({reference_game.width}x{reference_game.height})."
+                    )
+            time.sleep(DELAY_SECONDS)
+
         try:
             last_request_time = time.perf_counter() - DELAY_SECONDS
 
             while l < limit and g < guard:
                 g += 1  # catch infinite loop
 
-                game_id = random.randint(MIN_ID, MAX_ID)
-                if game_id in attempted_ids:
-                    continue
-                attempted_ids.add(game_id)
-                attempted_ids_file.write(f"{game_id}\n")
-                attempted_ids_file.flush()
+                game_id = next(retry_ids, None) if retry_attempted else None
+                if game_id is None:
+                    game_id = random.randint(MIN_ID, MAX_ID)
+                    if game_id in attempted_ids:
+                        continue
 
                 print(
                     f"\rLosses: {l}/{limit} | "
@@ -103,10 +161,26 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
                 html = load_game_page(page, url)
 
                 if html is None:
+                    page_load_failures += 1
                     continue
 
-                game = get_game(html)
+                pages_checked += 1
+                attempted_ids.add(game_id)
+                attempted_ids_file.write(f"{game_id}\n")
+                attempted_ids_file.flush()
+
+                game, parse_error = parse_game(html)
                 if game is None:
+                    unrecognized_pages += 1
+                    assert parse_error is not None
+                    parse_failures[parse_error] = parse_failures.get(parse_error, 0) + 1
+                    if unrecognized_pages <= 3:
+                        print(
+                            f"\n[diagnostic] Game {game_id} was not recognized "
+                            f"({parse_error}); title={page.title()!r}, "
+                            f"final_url={page.url!r}, "
+                            f"{describe_game_page(html)}"
+                        )
                     continue
                 valid_game_ids.add(game_id)
 
@@ -120,6 +194,16 @@ def fetch_losses(limit: int, folder: str, guard: int = GUARD,
         finally:
             context.close()
             browser.close()
+
+    print(f"\nPage load failures (eligible for retry): {page_load_failures:,}")
+    print(f"Pages checked this run: {pages_checked:,}")
+    print(f"Pages without a recognized game board: {unrecognized_pages:,}")
+    if parse_failures:
+        print("Parser rejection reasons:")
+        for reason, count in sorted(parse_failures.items()):
+            print(f"  {reason}: {count:,}")
+    if pages_checked:
+        print(f"Validity rate this run: {len(valid_game_ids) / pages_checked:.2%}")
 
     return attempted_ids, valid_game_ids, loss_ids
 
@@ -141,36 +225,43 @@ def load_game_page(page: Page, url: str) -> str | None:
     try:
         page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
     except PlaywrightTimeoutError:
-        return None
-    except Exception:
+        print(
+            f"\n[warning] Navigation timed out for {url}; checking the loaded page.",
+            file=sys.stderr,
+        )
+    except PlaywrightError as exc:
+        print(f"\n[warning] Could not load {url}: {exc}", file=sys.stderr)
         return None
 
     try:
         page.wait_for_selector(".cell", timeout=CELL_WAIT_TIMEOUT_MS)
     except PlaywrightTimeoutError:
-        return None
+        pass
 
     time.sleep(0.3) # settle time
-    return page.content()
+    try:
+        return page.content()
+    except PlaywrightError as exc:
+        print(f"\n[warning] Could not read page content for {url}: {exc}", file=sys.stderr)
+        return None
 
-def get_game(html: str) -> Game | None:
-    """Returns game given minesweeper.online html and returns None if invalid"""
+def parse_game(html: str) -> tuple[Game | None, str | None]:
+    """Parse a game and return a rejection reason when the page has no board."""
     soup = BeautifulSoup(html, "html.parser")
 
-    area_block = soup.find("div", id="AreaBlock")
-    if area_block is None:
-        return None
-
-    cells = soup.find_all("div", class_="cell")
+    cells = soup.find_all(class_="cell")
     if not cells:
-        return None
+        return None, "no .cell elements"
 
     max_x = 0
     max_y = 0
 
     for cell in cells:
-        x = int(cell["data-x"])
-        y = int(cell["data-y"])
+        try:
+            x = int(cell["data-x"])
+            y = int(cell["data-y"])
+        except (KeyError, TypeError, ValueError):
+            return None, "board cell has missing or invalid coordinates"
         max_x = max(max_x, x)
         max_y = max(max_y, y)
 
@@ -180,12 +271,15 @@ def get_game(html: str) -> Game | None:
     minecount = 0
     for i in range(3):
         zeros = "0" * i
-        mines_div = soup.find("div", id=f"top_area_mines_1{zeros}")
-        if mines_div is None: # Games less than 4 cells wide do not show their minecounts
-            return None
+        mines_div = soup.find(id=f"top_area_mines_1{zeros}")
+        if mines_div is None:
+            return None, f"missing mine counter #top_area_mines_1{zeros}"
         for cls in mines_div.get("class", []):
             if cls.startswith("hd_top-area-num"):
-                value = int(cls.replace("hd_top-area-num", ""))
+                try:
+                    value = int(cls.removeprefix("hd_top-area-num"))
+                except ValueError:
+                    continue
                 if 0 <= value <= 9:
                     minecount += value * 10 ** i
                 break
@@ -215,7 +309,23 @@ def get_game(html: str) -> Game | None:
 
         game.add(x, y, number, opened, mine, flag, incorrect)
 
+    return game, None
+
+
+def get_game(html: str) -> Game | None:
+    """Returns game given minesweeper.online html and returns None if invalid."""
+    game, _ = parse_game(html)
     return game
+
+
+def describe_game_page(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    counter_ids = ("top_area_mines_1", "top_area_mines_10", "top_area_mines_100")
+    counters = [counter_id for counter_id in counter_ids if soup.find(id=counter_id)]
+    cells = soup.find_all(class_="cell")
+    return (
+        f"cells={len(cells)}, mine counters={counters}"
+    )
 
 def is_loss(game: Game) -> bool:
     return game.loss_trigger() is not None
@@ -239,30 +349,28 @@ def download(game: Game, url: str, folder: str):
 
 
 if __name__ == "__main__":
-    num = 100
-    loss_folder = "losses"
-    if len(sys.argv) > 1:
-        for arg in sys.argv[1:]:
-            try:
-                num = int(arg)
-            except ValueError:
-                loss_folder = arg
-                pass
-    
+    parser = argparse.ArgumentParser(description="Find and save Minesweeper loss games.")
+    parser.add_argument("limit", nargs="?", type=int, default=100, help="number of losses to save")
+    parser.add_argument("folder", nargs="?", default="losses", help="folder for saved loss games")
+    parser.add_argument(
+        "--retry-attempted",
+        action="store_true",
+        help="recheck previously attempted IDs that do not already have saved loss files",
+    )
+    args = parser.parse_args()
+
     run_login()
 
     attempted_ids, valid_game_ids, loss_ids = fetch_losses(
-        limit=num,
-        folder=loss_folder
+        limit=args.limit,
+        folder=args.folder,
+        retry_attempted=args.retry_attempted,
     )
 
     print("\nFinished!")
-    print(f"Attempted IDs : {len(attempted_ids):,}")
-    print(f"Valid games   : {len(valid_game_ids):,}")
-    print(f"Losses saved  : {len(loss_ids):,}")
-
-    if attempted_ids:
-        print(f"Validity rate : {len(valid_game_ids) / len(attempted_ids):.2%}")
+    print(f"Attempted IDs (cached): {len(attempted_ids):,}")
+    print(f"Valid games this run : {len(valid_game_ids):,}")
+    print(f"Losses saved this run: {len(loss_ids):,}")
 
     if valid_game_ids:
-        print(f"Loss rate     : {len(loss_ids) / len(valid_game_ids):.2%}")
+        print(f"Loss rate this run   : {len(loss_ids) / len(valid_game_ids):.2%}")
